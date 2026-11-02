@@ -1,0 +1,286 @@
+name: "character"
+embedded_instances {
+  id: "root"
+  children: "shadow"
+  children: "leg_l"
+  children: "leg_r"
+  children: "torso"
+  children: "belt"
+  children: "head"
+  children: "helmet"
+  children: "pad_l"
+  children: "pad_r"
+  children: "back"
+  children: "arm_r"
+  children: "arm_l"
+  data: ""
+  position {
+    x: 0
+    y: 0
+    z: 0
+  }
+  scale3 {
+    x: 1
+    y: 1
+    z: 1
+  }
+}
+instances {
+  id: "shadow"
+  prototype: "/assets/models/sphere_part.go"
+  position {
+    x: 0
+    y: 0.02
+    z: 0
+  }
+  scale3 {
+    x: 0.95
+    y: 0.02
+    z: 0.95
+  }
+}
+embedded_instances {
+  id: "leg_l"
+  children: "leg_l_mesh"
+  data: ""
+  position {
+    x: -0.14
+    y: 0.82
+    z: 0
+  }
+  scale3 {
+    x: 1
+    y: 1
+    z: 1
+  }
+}
+instances {
+  id: "leg_l_mesh"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: -0.4
+    z: 0
+  }
+  scale3 {
+    x: 0.2
+    y: 0.82
+    z: 0.24
+  }
+}
+embedded_instances {
+  id: "leg_r"
+  children: "leg_r_mesh"
+  data: ""
+  position {
+    x: 0.14
+    y: 0.82
+    z: 0
+  }
+  scale3 {
+    x: 1
+    y: 1
+    z: 1
+  }
+}
+instances {
+  id: "leg_r_mesh"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: -0.4
+    z: 0
+  }
+  scale3 {
+    x: 0.2
+    y: 0.82
+    z: 0.24
+  }
+}
+instances {
+  id: "torso"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 1.18
+    z: 0
+  }
+  scale3 {
+    x: 0.56
+    y: 0.72
+    z: 0.32
+  }
+}
+instances {
+  id: "belt"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 0.86
+    z: 0
+  }
+  scale3 {
+    x: 0.6
+    y: 0.14
+    z: 0.36
+  }
+}
+instances {
+  id: "head"
+  prototype: "/assets/models/sphere_part.go"
+  position {
+    x: 0
+    y: 1.74
+    z: 0
+  }
+  scale3 {
+    x: 0.34
+    y: 0.38
+    z: 0.34
+  }
+}
+instances {
+  id: "helmet"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 1.86
+    z: 0
+  }
+  scale3 {
+    x: 0.4
+    y: 0.2
+    z: 0.4
+  }
+}
+instances {
+  id: "pad_l"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: -0.36
+    y: 1.5
+    z: 0
+  }
+  scale3 {
+    x: 0.26
+    y: 0.14
+    z: 0.38
+  }
+}
+instances {
+  id: "pad_r"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0.36
+    y: 1.5
+    z: 0
+  }
+  scale3 {
+    x: 0.26
+    y: 0.14
+    z: 0.38
+  }
+}
+instances {
+  id: "back"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 1.25
+    z: 0.24
+  }
+  scale3 {
+    x: 0.42
+    y: 0.52
+    z: 0.18
+  }
+}
+embedded_instances {
+  id: "arm_r"
+  children: "arm_r_mesh"
+  children: "weapon"
+  data: ""
+  position {
+    x: 0.38
+    y: 1.42
+    z: 0
+  }
+  scale3 {
+    x: 1
+    y: 1
+    z: 1
+  }
+}
+instances {
+  id: "arm_r_mesh"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 0
+    z: -0.22
+  }
+  scale3 {
+    x: 0.14
+    y: 0.14
+    z: 0.48
+  }
+}
+instances {
+  id: "weapon"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 0
+    z: -0.9
+  }
+  scale3 {
+    x: 0.08
+    y: 0.08
+    z: 0.9
+  }
+}
+embedded_instances {
+  id: "arm_l"
+  children: "arm_l_mesh"
+  children: "shield"
+  data: ""
+  position {
+    x: -0.38
+    y: 1.42
+    z: 0
+  }
+  scale3 {
+    x: 1
+    y: 1
+    z: 1
+  }
+}
+instances {
+  id: "arm_l_mesh"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: 0
+    z: -0.22
+  }
+  scale3 {
+    x: 0.14
+    y: 0.14
+    z: 0.48
+  }
+}
+instances {
+  id: "shield"
+  prototype: "/assets/models/cube_part.go"
+  position {
+    x: 0
+    y: -0.05
+    z: -0.48
+  }
+  scale3 {
+    x: 0.62
+    y: 0.72
+    z: 0.07
+  }
+}
+scale_along_z: 1

@@ -1,0 +1,9 @@
+mesh: "/builtins/assets/gltf/cube.gltf"
+name: "{{NAME}}"
+materials {
+  name: "default"
+  material: "/assets/materials/palette.material"
+}
+skeleton: ""
+animations: ""
+default_animation: ""

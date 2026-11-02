@@ -1,0 +1,185 @@
+-- Camp hub: barracks yard with the blacksmith, trainer, merchant, background
+-- gladiators sparring with dummies, and the arena gate. Menus live in gui/meta.gui.
+local builder = require("modules.character_builder")
+local profile = require("modules.profile")
+local palette = require("modules.palette")
+local gs = require("modules.game_state")
+
+local HIDDEN = vmath.vector3(0, -100, 0)
+
+-- Camera focus points: { target, yaw, pitch, dist }
+local FOCUS = {
+	overview = { vmath.vector3(0, 1.2, -2), 0, 0.42, 13 },
+	blacksmith = { vmath.vector3(-6, 1.3, -4), 0.55, 0.22, 4.8 },
+	trainer = { vmath.vector3(0, 1.3, -8), 0, 0.25, 5.2 },
+	merchant = { vmath.vector3(6, 1.2, -4), -0.55, 0.22, 4.8 },
+	gate = { vmath.vector3(0, 2.5, -14), 0, 0.12, 7.5 },
+}
+
+local function cube(self, x, y, z, sx, sy, sz, color_name, yaw)
+	local rot = yaw and vmath.quat_rotation_y(yaw) or nil
+	local id = factory.create("#cube_factory", vmath.vector3(x, y, z), rot, nil, vmath.vector3(sx, sy, sz))
+	go.set(msg.url(nil, id, "model"), "tint", palette.get(color_name))
+	return id
+end
+
+local function sphere(self, x, y, z, s, color_name)
+	local id = factory.create("#sphere_factory", vmath.vector3(x, y, z), nil, nil, s)
+	go.set(msg.url(nil, id, "model"), "tint", palette.get(color_name))
+	return id
+end
+
+local function build_environment(self)
+	cube(self, 0, -0.1, -4, 60, 0.2, 50, "sand_dark")
+	-- barracks walls
+	cube(self, 0, 2.5, -17, 34, 5, 1, "wall")
+	cube(self, -16, 2.5, -4, 1, 5, 26, "wall")
+	cube(self, 16, 2.5, -4, 1, 5, 26, "wall")
+	for i = -3, 3 do
+		cube(self, i * 4.6, 2.5, -16.4, 0.6, 5, 0.6, "rust_dark")
+	end
+	-- arena gate with bars
+	cube(self, 0, 2.6, -16.3, 5, 5.2, 0.4, "leather_dark")
+	for i = -4, 4 do
+		cube(self, i * 0.55, 2.4, -16, 0.12, 4.6, 0.12, "steel_dark")
+	end
+	cube(self, 0, 5.6, -16.2, 6, 0.8, 0.8, "rust")
+
+	-- blacksmith: anvil, forge
+	cube(self, -6.5, 0.45, -5.2, 1.2, 0.9, 0.6, "steel_dark")
+	cube(self, -6.5, 0.95, -5.2, 1.5, 0.2, 0.7, "steel")
+	cube(self, -9, 0.8, -6.5, 2, 1.6, 2, "concrete", 0.3)
+	cube(self, -9, 1.7, -6.5, 1.4, 0.3, 1.4, "fire", 0.3)
+
+	-- trainer: ring posts and ropes
+	for _, p in ipairs({ { -3, -6 }, { 3, -6 }, { -3, -11 }, { 3, -11 } }) do
+		cube(self, p[1], 0.8, p[2], 0.25, 1.6, 0.25, "wood")
+	end
+	cube(self, 0, 1.2, -6, 6, 0.06, 0.06, "rags")
+	cube(self, 0, 1.2, -11, 6, 0.06, 0.06, "rags")
+	cube(self, -3, 1.2, -8.5, 0.06, 0.06, 5, "rags")
+	cube(self, 3, 1.2, -8.5, 0.06, 0.06, 5, "rags")
+
+	-- merchant tent with junk
+	cube(self, 7.5, 1.6, -6.5, 4, 3.2, 3, "cloth_blue", -0.3)
+	cube(self, 7.5, 3.4, -6.5, 4.4, 0.4, 3.4, "cloth_red", -0.3)
+	cube(self, 5.4, 0.4, -3.6, 1.6, 0.8, 0.9, "wood", 0.4)
+	cube(self, 9.5, 0.5, -3.5, 1, 1, 1, "barrel")
+	cube(self, 10.6, 0.35, -2.8, 0.7, 0.7, 0.7, "tire")
+
+	-- dummies for the background gladiators
+	self.dummies = { { -11, -1 }, { -12, -10 }, { 11, -10 }, { 12, 1 }, { -11, 6 } }
+	for _, d in ipairs(self.dummies) do
+		cube(self, d[1], 0.8, d[2], 0.25, 1.6, 0.25, "wood")
+		cube(self, d[1], 1.3, d[2], 0.6, 0.7, 0.35, "rags")
+		sphere(self, d[1], 1.85, d[2], 0.35, "rags")
+	end
+
+	-- torches
+	for _, t in ipairs({ { -14, -15 }, { 14, -15 }, { -14, 5 }, { 14, 5 }, { -3, -15.5 }, { 3, -15.5 } }) do
+		cube(self, t[1], 1.2, t[2], 0.15, 2.4, 0.15, "wood")
+		cube(self, t[1], 2.5, t[2], 0.3, 0.3, 0.3, "fire")
+	end
+	-- crates and benches
+	cube(self, -4, 0.3, 1, 2, 0.6, 0.6, "wood", 0.2)
+	cube(self, 4, 0.4, 2, 0.8, 0.8, 0.8, "wood", 0.6)
+end
+
+local function spawn_character(self, x, z, face)
+	local ids = collectionfactory.create("#character_factory", HIDDEN)
+	local view = builder.attach(ids)
+	builder.show(view)
+	go.set_position(vmath.vector3(x, 0, z), view.root)
+	local u = { state = "idle", t = 0, combo = 1, face = face or 0, cur_speed = 0, team = 1 }
+	return { view = view, u = u }
+end
+
+local function face_to(dx, dz)
+	return math.atan2(-dx, -dz)
+end
+
+function init(self)
+	math.randomseed(os.time())
+	build_environment(self)
+
+	self.player = spawn_character(self, 0, 0.5, face_to(0, 1))
+	builder.apply_player(self.player.view, profile.data)
+
+	self.npcs = {}
+	local npc_spots = {
+		blacksmith = { -6, -4, face_to(0.6, 1) },
+		trainer = { 0, -8.2, 0 },
+		merchant = { 6, -4, face_to(-0.6, 1) },
+	}
+	for id, s in pairs(npc_spots) do
+		local c = spawn_character(self, s[1], s[2], s[3])
+		builder.apply_preset(c.view, id)
+		c.u.face = s[3]
+		if id == "blacksmith" then
+			c.u.cur_windup, c.u.cur_recovery = 0.5, 0.4
+			c.loop = true
+		end
+		self.npcs[id] = c
+	end
+
+	-- background gladiators training on dummies
+	self.extras = {}
+	for i, d in ipairs(self.dummies) do
+		local a = math.random() * math.pi * 2
+		local x, z = d[1] + math.sin(a) * 1.6, d[2] + math.cos(a) * 1.6
+		local c = spawn_character(self, x, z, face_to(d[1] - x, d[2] - z))
+		builder.apply_preset(c.view, i % 2 == 0 and "gladiator_b" or "gladiator_a")
+		c.u.cur_windup = 0.3 + math.random() * 0.2
+		c.u.cur_recovery = 0.4 + math.random() * 0.2
+		c.u.t = math.random() * 1.5
+		c.loop = true
+		self.extras[#self.extras + 1] = c
+	end
+
+	local f = FOCUS.overview
+	self.cam = { target = vmath.vector3(f[1]), yaw = f[2], pitch = f[3], dist = f[4] }
+	self.time = 0
+end
+
+local function lerp(a, b, k)
+	return a + (b - a) * k
+end
+
+local function update_camera(self, dt)
+	local f = FOCUS[gs.camp_focus or "overview"] or FOCUS.overview
+	local k = math.min(1, dt * 3)
+	local cam = self.cam
+	local yaw = f[2]
+	if not gs.camp_focus then
+		-- slow idle sway
+		yaw = yaw + math.sin(self.time * 0.15) * 0.35
+	end
+	cam.target = vmath.lerp(k, cam.target, f[1])
+	cam.yaw = lerp(cam.yaw, yaw, k)
+	cam.pitch = lerp(cam.pitch, f[3], k)
+	cam.dist = lerp(cam.dist, f[4], k)
+	local cp = math.cos(cam.pitch)
+	local back = vmath.vector3(math.sin(cam.yaw) * cp, math.sin(cam.pitch), math.cos(cam.yaw) * cp)
+	go.set_position(cam.target + back * cam.dist, "camera")
+	go.set_rotation(vmath.quat_rotation_y(cam.yaw) * vmath.quat_rotation_x(-cam.pitch), "camera")
+end
+
+function update(self, dt)
+	self.time = self.time + dt
+	if gs.camp_player_dirty then
+		gs.camp_player_dirty = false
+		builder.apply_player(self.player.view, profile.data)
+	end
+	builder.animate(self.player.view, self.player.u, dt)
+	for _, c in pairs(self.npcs) do
+		if c.loop then
+			builder.idle_loop(c.view, c.u, dt)
+		else
+			builder.animate(c.view, c.u, dt)
+		end
+	end
+	for _, c in ipairs(self.extras) do
+		builder.idle_loop(c.view, c.u, dt)
+	end
+	update_camera(self, dt)
+end

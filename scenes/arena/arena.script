@@ -1,0 +1,1053 @@
+-- Arena match controller: builds the arena, owns the pools and the combat world,
+-- runs tournament series / survival waves / challenges, drives the camera and FX.
+local combat = require("modules.combat_system")
+local ai = require("modules.ai_brain")
+local builder = require("modules.character_builder")
+local pool = require("modules.pool_manager")
+local stats = require("modules.stats_calculator")
+local profile = require("modules.profile")
+local gs = require("modules.game_state")
+local input = require("modules.input_adapter")
+local palette = require("modules.palette")
+local ads = require("modules.ads")
+local arenas_db = require("data.arenas_db")
+local weapons_db = require("data.weapons_db")
+local armor_db = require("data.armor_db")
+local enemies_db = require("data.enemies_db")
+local presets = require("data.npc_presets")
+
+local CHAR_POOL = 24
+local DART_POOL = 40
+local FX_POOL = 64
+local AIM_DOTS = 16
+
+local CAM_FOV = 0.9
+local CAM_NEAR = 0.1
+local CAM_FAR = 200
+local CAM_DIST = 6.2
+local LOOK_SENS = 0.0045
+local ANIM_NEAR = 15
+
+local UP = vmath.vector3(0, 1, 0)
+local HIDDEN = vmath.vector3(0, -100, 0)
+
+local function color(name)
+	return palette.get(name)
+end
+
+local function spawn_static(self, factory_url, x, y, z, sx, sy, sz, color_name, yaw)
+	local rot = yaw and vmath.quat_rotation_y(yaw) or nil
+	local id = factory.create(factory_url, vmath.vector3(x, y, z), rot, nil, vmath.vector3(sx, sy, sz))
+	go.set(msg.url(nil, id, "model"), "tint", type(color_name) == "string" and color(color_name) or color_name)
+	self.static[#self.static + 1] = id
+	return id
+end
+
+-- Environment -----------------------------------------------------------------
+
+local function build_environment(self)
+	local def = self.def
+	local R = def.radius
+	local cube = "#cube_factory"
+	self.static = {}
+
+	spawn_static(self, cube, 0, -0.1, 0, R * 2 + 30, 0.2, R * 2 + 30, def.floor)
+	-- sand patches: subtle, darker than the floor
+	for _ = 1, 10 do
+		local a, d = math.random() * math.pi * 2, math.random() * (R - 2)
+		spawn_static(self, cube, math.sin(a) * d, 0.005, math.cos(a) * d, 0.8 + math.random() * 1.6, 0.02,
+			0.8 + math.random() * 1.6, "sand_dark", math.random() * 3)
+	end
+
+	-- wall ring with a gate gap at -Z
+	local segments = 30
+	local seg_len = 2 * math.pi * (R + 0.5) / segments + 0.15
+	for i = 0, segments - 1 do
+		local a = (i + 0.5) / segments * math.pi * 2
+		local x, z = math.sin(a) * (R + 0.5), math.cos(a) * (R + 0.5)
+		local is_gate = math.abs(z + R + 0.5) < 2 and math.abs(x) < 2
+		if not is_gate then
+			spawn_static(self, cube, x, 1.2, z, seg_len, 2.4, 1.0, i % 3 == 0 and "rust" or "wall", a)
+			-- stands
+			local x2, z2 = math.sin(a) * (R + 3), math.cos(a) * (R + 3)
+			spawn_static(self, cube, x2, 2.2, z2, seg_len * 1.2, 4.4, 3.5, "concrete", a)
+			local x3, z3 = math.sin(a) * (R + 6.5), math.cos(a) * (R + 6.5)
+			spawn_static(self, cube, x3, 3.6, z3, seg_len * 1.45, 7.2, 3.5, "wall", a)
+		end
+	end
+	-- crowd silhouettes
+	for i = 1, 56 do
+		local a = math.random() * math.pi * 2
+		local row = math.random() < 0.5
+		local d = row and (R + 2.6 + math.random()) or (R + 6 + math.random())
+		local x, z = math.sin(a) * d, math.cos(a) * d
+		if not (z < -R and math.abs(x) < 3) then
+			local y = row and 4.9 or 7.7
+			local tints = { "crowd", "cloth_red", "leather", "cloth_blue", "rags" }
+			spawn_static(self, cube, x, y, z, 0.5, 0.9, 0.4, tints[math.random(#tints)], a)
+		end
+	end
+
+	-- gate posts and bars
+	local gz = -R - 0.4
+	spawn_static(self, cube, -2.2, 2, gz, 0.6, 4, 1.2, "rust_dark")
+	spawn_static(self, cube, 2.2, 2, gz, 0.6, 4, 1.2, "rust_dark")
+	spawn_static(self, cube, 0, 4.2, gz, 5, 0.6, 1.2, "rust_dark")
+	self.gate_bars = {}
+	for i = -3, 3 do
+		local id = spawn_static(self, cube, i * 0.55, 1.9, gz, 0.12, 3.8, 0.12, "steel_dark")
+		self.gate_bars[#self.gate_bars + 1] = id
+	end
+
+	-- covers
+	self.props = {}
+	local k = R / 16
+	for _, p in ipairs(arenas_db.props) do
+		local kind, x, z = p[1], p[2] * k, p[3] * k
+		if kind == "barrel" then
+			local yaw = math.random() * 3
+			spawn_static(self, cube, x, 0.6, z, 0.9, 1.2, 0.9, math.random() < 0.5 and "barrel" or "barrel_red", yaw)
+			spawn_static(self, cube, x, 0.85, z, 0.96, 0.08, 0.96, "rust_dark", yaw)
+			self.props[#self.props + 1] = { x = x, z = z, r = 0.6, h = 1.2 }
+		else
+			spawn_static(self, cube, x, 0.55, z, 1.8, 1.1, 1.0, "concrete", math.random() * 3)
+			self.props[#self.props + 1] = { x = x, z = z, r = 0.95, h = 1.1 }
+		end
+	end
+	-- stakes along the wall
+	for i = 1, 8 do
+		local a = i / 8 * math.pi * 2 + 0.2
+		local x, z = math.sin(a) * (R - 0.6), math.cos(a) * (R - 0.6)
+		local id = spawn_static(self, cube, x, 0.9, z, 0.14, 1.8, 0.14, "wood", a)
+		go.set_rotation(vmath.quat_rotation_y(a) * vmath.quat_rotation_x(0.5), id)
+	end
+end
+
+local function open_gate(self, open)
+	for _, id in ipairs(self.gate_bars) do
+		go.animate(id, "position.y", go.PLAYBACK_ONCE_FORWARD, open and 5.6 or 1.9, go.EASING_OUTQUAD, 0.6)
+	end
+end
+
+-- Pools -----------------------------------------------------------------------
+
+local function create_pools(self)
+	self.char_pool = pool.new(CHAR_POOL, function()
+		local ids = collectionfactory.create("#character_factory", HIDDEN)
+		return { view = builder.attach(ids) }
+	end, function(obj)
+		builder.hide(obj.view)
+	end, function(obj)
+		builder.show(obj.view)
+	end)
+	self.dart_pool = pool.new_model_pool("#cube_factory", DART_POOL)
+	self.fx_pool = pool.new_model_pool("#cube_factory", FX_POOL)
+	self.aim_dots = {}
+	for i = 1, AIM_DOTS do
+		local id = factory.create("#sphere_factory", HIDDEN, nil, nil, 0.12)
+		go.set(msg.url(nil, id, "model"), "tint", color("aim"))
+		self.aim_dots[i] = id
+	end
+	self.fx = {}
+end
+
+-- FX ---------------------------------------------------------------------------
+
+local function burst(self, x, y, z, color_name, count, speed, size)
+	local c = color(color_name)
+	for _ = 1, count do
+		local obj = pool.acquire(self.fx_pool)
+		if not obj then return end
+		pool.set_tint(obj, c)
+		local a = math.random() * math.pi * 2
+		local s = speed * (0.5 + math.random())
+		local fx = {
+			obj = obj, x = x, y = y, z = z,
+			vx = math.cos(a) * s, vy = (0.5 + math.random()) * s, vz = math.sin(a) * s,
+			life = 0.35 + math.random() * 0.3, size = size or 0.09,
+		}
+		fx.max = fx.life
+		go.set_scale(fx.size, obj.id)
+		go.set_position(vmath.vector3(x, y, z), obj.id)
+		self.fx[#self.fx + 1] = fx
+	end
+end
+
+local function update_fx(self, dt)
+	for i = #self.fx, 1, -1 do
+		local f = self.fx[i]
+		f.life = f.life - dt
+		if f.life <= 0 then
+			pool.release(self.fx_pool, f.obj)
+			table.remove(self.fx, i)
+		else
+			f.vy = f.vy - 14 * dt
+			f.x, f.y, f.z = f.x + f.vx * dt, math.max(0.02, f.y + f.vy * dt), f.z + f.vz * dt
+			go.set_position(vmath.vector3(f.x, f.y, f.z), f.obj.id)
+			go.set_scale(f.size * (f.life / f.max), f.obj.id)
+		end
+	end
+end
+
+local function shake(self, amount)
+	self.shake = math.max(self.shake, amount)
+end
+
+-- Units ------------------------------------------------------------------------
+
+local function make_player(self)
+	local d = profile.data
+	local st = profile.stats()
+	local melee = weapons_db.get(d.melee) or weapons_db.get("rusty_pipe")
+	local sec = weapons_db.get(d.secondary) or weapons_db.get("rebar_dart")
+	local shield = weapons_db.shields[d.shield or ""]
+	local obj = pool.acquire(self.char_pool)
+	builder.apply_player(obj.view, d)
+
+	local u = {
+		team = 1, is_player = true, name = "Ты",
+		x = 0, z = self.def.radius * 0.25, r = 0.45, scale = 1,
+		hp = st.hp, str = st.str, agi = st.agi,
+		armor = armor_db.get(d.armor).armor,
+		speed = stats.get_move_speed(5.4, st.agi),
+		atk_rate = stats.get_attack_rate(st.agi),
+		max_stamina = stats.get_max_stamina(st.agi),
+		dmg_base = melee.damage * (1 + profile.upgrade_level(d.melee) * weapons_db.UPGRADE_DAMAGE),
+		reach = melee.range, arc = melee.arc, windup = melee.windup, recovery = melee.recovery,
+		attack_cost = melee.stamina, max_combo = 2,
+		bleed_chance = (melee.bleed_chance or 0) + (profile.has_mod("barbed_wire") and 0.25 or 0),
+		shield = shield and { block = shield.block } or nil,
+		shock_on_block = shield ~= nil and profile.has_mod("battery"),
+		secondary = sec, ammo = sec.ammo, ammo_max = sec.ammo,
+		ranged_mult = 1 + profile.upgrade_level(d.secondary) * weapons_db.UPGRADE_DAMAGE,
+		propane = profile.has_mod("propane"),
+		turn_rate = 14, face = 0,
+		view = obj.view, pool_obj = obj,
+	}
+	combat.add_unit(self.world, u)
+	self.player = u
+	return u
+end
+
+local function apply_challenge_rules(self)
+	local ch = self.challenge
+	if not ch then return end
+	self.player.melee_enabled = ch.melee ~= false
+	self.player.throw_enabled = ch.throw ~= false
+	if ch.kills then
+		-- darts challenge: give the dart set regardless of loadout
+		local darts = weapons_db.get("rebar_dart")
+		self.player.secondary = darts
+		self.player.ammo, self.player.ammo_max = 5, 5
+	end
+	if ch.survive and not self.player.shield then
+		-- loaner shield for the shield challenge
+		self.player.shield = { block = 0.8 }
+	end
+end
+
+local function spawn_enemy(self, kind)
+	local e = enemies_db.enemies[kind]
+	if not e then return end
+	local obj = pool.acquire(self.char_pool)
+	if not obj then return end
+	local preset_id = kind == "boss" and self.def.boss or e.preset
+	local look = builder.apply_preset(obj.view, preset_id)
+	local mult = enemies_db.tier_mult(self.def.tier)
+	if self.match.mode == "sparring" then mult = 1 end
+	local R = self.def.radius
+	local u = {
+		team = 2, kind = kind, name = presets.presets[preset_id].name,
+		x = (math.random() - 0.5) * 2.4, z = -R + 1.2,
+		r = 0.45 * look.scale, scale = look.scale,
+		hp = e.hp * mult, armor = e.armor,
+		speed = e.speed, dmg_base = e.damage * mult, dmg_mult = mult,
+		reach = e.ai == "thrower" and 1.8 or e.range, arc = 100,
+		windup = e.windup, recovery = e.recovery,
+		max_combo = e.boss and 3 or 1,
+		poise = e.semi_boss or e.boss,
+		shield = e.shield and { block = 0.7 } or nil,
+		boss = e.boss, semi_boss = e.semi_boss,
+		projectile_weapon = e.ai == "thrower" and weapons_db.get("rebar_dart") or nil,
+		turn_rate = 7, face = math.pi,
+		scrap = e.scrap, xp = e.xp, gears = e.gears or 0,
+		view = obj.view, pool_obj = obj,
+	}
+	combat.add_unit(self.world, u)
+	ai.init_unit(u, e.ai)
+	if u.boss or u.semi_boss then
+		self.boss = u
+	end
+	go.set_position(vmath.vector3(u.x, 0, u.z), obj.view.root)
+	return u
+end
+
+-- Rounds -----------------------------------------------------------------------
+
+local function banner(self, text)
+	gs.hud.banner = text
+	gs.hud.banner_id = gs.hud.banner_id + 1
+end
+
+local function round_list(self, index)
+	local mode = self.match.mode
+	if mode == "tournament" then
+		local r = arenas_db.series[index]
+		if not r then return nil end
+		local list = {}
+		if r.horde then
+			for _ = 1, math.max(6, self.def.team_size) do list[#list + 1] = "minion" end
+		else
+			for _, k in ipairs(r.enemies) do list[#list + 1] = k end
+		end
+		return list, r.title
+	elseif mode == "survival" then
+		local w = arenas_db.survival[index]
+		if not w then return nil end
+		local list = {}
+		for _, k in ipairs(w) do list[#list + 1] = k end
+		-- bigger arenas bring bigger waves
+		for _ = 1, math.max(0, self.def.team_size - 5) do
+			list[#list + 1] = w[math.random(#w)]
+		end
+		return list, "Волна " .. index .. "/" .. #arenas_db.survival
+	elseif mode == "sparring" then
+		if index > 1 then return nil end
+		return { "raider" }, "Спарринг"
+	end
+	return nil
+end
+
+local function total_rounds(self)
+	local mode = self.match.mode
+	if mode == "tournament" then return #arenas_db.series end
+	if mode == "survival" then return #arenas_db.survival end
+	return 1
+end
+
+local function start_round(self, index)
+	self.round = index
+	if self.match.mode == "challenge" then
+		self.spawn_queue = {}
+		self.phase = "fight"
+		gs.hud.round_title = self.challenge.title
+		banner(self, self.challenge.title)
+		open_gate(self, true)
+		return
+	end
+	local list, title = round_list(self, index)
+	self.spawn_queue = list
+	self.spawn_timer = 1.0
+	self.phase = "fight"
+	gs.hud.round_title = title
+	banner(self, title)
+	open_gate(self, true)
+end
+
+local function heal_player(self, frac)
+	local p = self.player
+	p.hp = math.min(p.max_hp, p.hp + p.max_hp * frac)
+end
+
+local function collect_all_loot(self)
+	local p = self.player
+	if p.secondary and p.secondary.kind == "throw" then
+		combat.pickup(self.world, p, 1000)
+	end
+	if p.secondary and p.secondary.kind ~= "throw" then
+		p.ammo = p.ammo_max
+	end
+end
+
+local function grant_trophy(self)
+	for _, id in ipairs(weapons_db.melee_order) do
+		if not profile.owns(id) then
+			profile.data.owned[id] = true
+			profile.data.melee = id
+			local w = weapons_db.get(id)
+			local p = self.player
+			p.dmg_base = w.damage
+			p.reach, p.arc, p.windup, p.recovery, p.attack_cost = w.range, w.arc, w.windup, w.recovery, w.stamina
+			builder.set_weapon_visual(p.view, id)
+			return w.title
+		end
+	end
+	return nil
+end
+
+local function finish_match(self, victory)
+	if self.phase == "results" then return end
+	self.phase = "results"
+	ads.gameplay_stop()
+	local r = self.reward
+	local mode = self.match.mode
+	if victory then
+		if mode == "tournament" or mode == "survival" then
+			r.scrap = r.scrap + self.def.win_credits
+			r.xp = r.xp + math.floor(self.def.win_credits * 0.6)
+			if mode == "tournament" then
+				profile.data.series_won = profile.data.series_won + 1
+			end
+		elseif mode == "challenge" then
+			r.scrap = r.scrap + (self.challenge.reward_scrap or 0)
+			r.gears = r.gears + (self.challenge.reward_gears or 0)
+			r.xp = r.xp + 60
+		end
+	end
+	local d = profile.data
+	d.scrap = d.scrap + r.scrap
+	d.gears = d.gears + r.gears
+	local levels = profile.add_xp(r.xp)
+	d.fights = d.fights + 1
+	d.fights_since_ad = d.fights_since_ad + 1
+	d.tutorial_done = true
+	profile.save()
+
+	local lines = {
+		"Убийств: " .. r.kills,
+		"Металлолом: +" .. r.scrap,
+		"Шестерни: +" .. r.gears,
+		"Опыт: +" .. r.xp,
+	}
+	if levels > 0 then
+		lines[#lines + 1] = "НОВЫЙ УРОВЕНЬ! +" .. (levels * stats.POINTS_PER_LEVEL) .. " очков у Тренера"
+	end
+	if r.trophy then
+		lines[#lines + 1] = "Трофей: " .. r.trophy
+	end
+	gs.hud.result = {
+		victory = victory,
+		title = victory and "ПОБЕДА" or "ПОРАЖЕНИЕ",
+		lines = lines,
+		scrap = r.scrap,
+		can_double = r.scrap > 0,
+	}
+	gs.hud.window = "results"
+	gs.last_result = gs.hud.result
+	input.reset()
+end
+
+local function on_round_cleared(self)
+	if self.round >= total_rounds(self) then
+		finish_match(self, true)
+		return
+	end
+	self.phase = "clear"
+	self.clear_timer = 2.6
+	heal_player(self, 0.3)
+	collect_all_loot(self)
+	banner(self, "Раунд пройден!")
+	open_gate(self, false)
+end
+
+-- Events -> FX / rewards ---------------------------------------------------------
+
+local function unit_pos(u, y)
+	return u.x, y or 1.2 * (u.scale or 1), u.z
+end
+
+local function handle_events(self)
+	local events = self.world.events
+	self.world.events = {}
+	for _, ev in ipairs(events) do
+		local t = ev.type
+		if t == "hit" then
+			local tgt = ev.target
+			local x, y, z = unit_pos(tgt)
+			if ev.kind ~= "dot" then
+				builder.flash(tgt.view)
+				burst(self, x, y, z, ev.blocked and "spark" or "blood", ev.blocked and 6 or 7, 3)
+			end
+			if ev.attacker and ev.attacker.is_player and ev.kind ~= "dot" then
+				self.hitstop = 0.05
+				shake(self, 0.08)
+				self.reward.damage = self.reward.damage + ev.dmg
+			elseif tgt.is_player and ev.kind ~= "dot" then
+				self.hitstop = 0.03
+				shake(self, 0.18)
+			end
+			local col = tgt.is_player and "hp_red" or (ev.kind == "dot" and "dot" or "white")
+			gs.add_floater(x, y + 0.9, z, tostring(math.floor(ev.dmg + 0.5)), col)
+		elseif t == "block" then
+			local x, y, z = unit_pos(ev.unit, 1.3)
+			burst(self, x, y, z, "spark", 10, 4.5, 0.07)
+			shake(self, 0.06)
+		elseif t == "parry" then
+			local x, y, z = unit_pos(ev.unit, 1.5)
+			burst(self, x, y, z, "spark", 16, 6, 0.08)
+			self.hitstop = 0.09
+			gs.add_floater(x, y + 0.8, z, "ПАРИРОВАНИЕ!", "gold")
+		elseif t == "shock" then
+			local x, y, z = unit_pos(ev.unit)
+			burst(self, x, y, z, "shock", 12, 5, 0.07)
+			gs.add_floater(x, y + 1, z, "ШОК", "blue")
+		elseif t == "guard_break" then
+			local x, y, z = unit_pos(ev.unit)
+			gs.add_floater(x, y + 1, z, "Защита пробита", "gold")
+		elseif t == "dodge" then
+			if ev.unit.is_player then
+				local x, y, z = unit_pos(ev.unit)
+				gs.add_floater(x, y + 1, z, "Уклон", "gray")
+			end
+		elseif t == "death" then
+			local u = ev.unit
+			local x, y, z = unit_pos(u, 1)
+			burst(self, x, y, z, "blood", 12, 4)
+			burst(self, x, 0.6, z, "rust", 8, 3, 0.12)
+			u.dead_time = 0
+			if u.team == 2 then
+				local r = self.reward
+				r.kills = r.kills + 1
+				local scrap = u.scrap or 0
+				if ev.finisher then
+					scrap = math.floor(scrap * 1.5)
+					gs.add_floater(x, y + 1.6, z, "ДОБИВАНИЕ!", "gold")
+				end
+				r.scrap = r.scrap + scrap
+				r.xp = r.xp + (u.xp or 0)
+				r.gears = r.gears + (u.gears or 0)
+				gs.add_floater(x, y + 1.1, z, "+" .. scrap .. " лома", "gold")
+				shake(self, u.boss and 0.4 or 0.12)
+				if u.boss and self.match.mode == "tournament" then
+					local trophy = grant_trophy(self)
+					if trophy then
+						r.trophy = trophy
+						banner(self, "Трофей: " .. trophy .. "!")
+					end
+				end
+				if u == self.boss then
+					self.boss = nil
+				end
+				if self.challenge and self.challenge.kills then
+					self.challenge_kills = self.challenge_kills + 1
+				end
+			else
+				self.phase = "dead"
+				ads.gameplay_stop()
+				gs.hud.can_revive = not self.revived
+				gs.hud.window = "defeat"
+				input.reset()
+			end
+		elseif t == "projectile_spawn" then
+			local obj = pool.acquire(self.dart_pool)
+			ev.p.obj = obj
+			if obj then
+				local w = ev.p.weapon
+				pool.set_tint(obj, ev.p.burn and color("fire") or color(w.visual.color))
+				local s = w.visual.scale
+				go.set_scale(vmath.vector3(s[1], s[2], s[3]), obj.id)
+			end
+		elseif t == "projectile_free" then
+			if ev.p.obj then
+				pool.release(self.dart_pool, ev.p.obj)
+				ev.p.obj = nil
+			end
+		elseif t == "projectile_prop" or t == "projectile_ground" then
+			burst(self, ev.p.x, ev.p.y, ev.p.z, "sand_dark", 4, 2, 0.07)
+		end
+	end
+end
+
+-- Camera -------------------------------------------------------------------------
+
+local function update_camera(self, dt)
+	local p = self.player
+	local yaw, pitch = self.cam_yaw, self.cam_pitch
+	local target = vmath.vector3(p.x, 1.45, p.z)
+	-- over-the-shoulder offset
+	target.x = target.x + math.cos(yaw) * 0.45
+	target.z = target.z - math.sin(yaw) * 0.45
+	local cp = math.cos(pitch)
+	local back = vmath.vector3(math.sin(yaw) * cp, math.sin(pitch), math.cos(yaw) * cp)
+	local dist = CAM_DIST
+	local R = self.def.radius - 0.5
+	for _ = 1, 8 do
+		local pos = target + back * dist
+		if pos.x * pos.x + pos.z * pos.z <= R * R then break end
+		dist = dist * 0.85
+	end
+	-- smooth follow
+	self.cam_target = self.cam_target and vmath.lerp(math.min(1, dt * 12), self.cam_target, target) or target
+	local pos = self.cam_target + back * dist
+	if self.shake > 0 then
+		local s = self.shake
+		pos = pos + vmath.vector3((math.random() - 0.5) * s, (math.random() - 0.5) * s, (math.random() - 0.5) * s)
+		self.shake = math.max(0, self.shake - dt * 1.5)
+	end
+	local rot = vmath.quat_rotation_y(yaw) * vmath.quat_rotation_x(-pitch)
+	go.set_position(pos, "camera")
+	go.set_rotation(rot, "camera")
+
+	-- matrices for GUI projection (floating numbers, prompts)
+	local w, h = window.get_size()
+	if w > 0 and h > 0 then
+		local forward = vmath.rotate(rot, vmath.vector3(0, 0, -1))
+		local view = vmath.matrix4_look_at(pos, pos + forward, UP)
+		local proj = vmath.matrix4_perspective(CAM_FOV, w / h, CAM_NEAR, CAM_FAR)
+		gs.hud.view_proj = proj * view
+		gs.hud.win_w, gs.hud.win_h = w, h
+	end
+	self.cam_pos = pos
+end
+
+-- Player control -------------------------------------------------------------------
+
+local function soft_lock(self, p)
+	-- attacks snap to the closest enemy in front: forgiving for web/mobile players
+	local best, best_d = nil, 3.8
+	local fx, fz = combat.forward(p.want_face)
+	for _, u in ipairs(self.world.units) do
+		if u.alive and u.team ~= p.team then
+			local dx, dz = u.x - p.x, u.z - p.z
+			local d = math.sqrt(dx * dx + dz * dz)
+			if d < best_d and (d < 1.5 or (fx * dx + fz * dz) / d > -0.2) then
+				best, best_d = u, d
+			end
+		end
+	end
+	if best then
+		p.face = combat.face_to(best.x - p.x, best.z - p.z)
+		p.want_face = p.face
+	end
+end
+
+local function update_player_input(self, dt)
+	local p = self.player
+	local edges, look_dx, look_dy = input.consume()
+
+	if edges.pause then
+		gs.push_request("pause")
+	end
+	if not p.alive or self.phase == "results" then
+		return
+	end
+
+	-- camera
+	if p.state == "aim" then
+		self.aim_pitch = math.max(-0.05, math.min(0.85, self.aim_pitch - look_dy * LOOK_SENS))
+	else
+		self.cam_pitch = math.max(0.12, math.min(0.85, self.cam_pitch - look_dy * LOOK_SENS))
+	end
+	self.cam_yaw = self.cam_yaw - look_dx * LOOK_SENS
+	if input.keys.cam_left then self.cam_yaw = self.cam_yaw + 2.2 * dt end
+	if input.keys.cam_right then self.cam_yaw = self.cam_yaw - 2.2 * dt end
+
+	-- movement in camera space
+	local mx, my = input.get_move()
+	local yaw = self.cam_yaw
+	local fx, fz = -math.sin(yaw), -math.cos(yaw)
+	local rx, rz = math.cos(yaw), -math.sin(yaw)
+	p.move_x = rx * mx + fx * my
+	p.move_z = rz * mx + fz * my
+
+	local s = p.state
+	if s == "aim" or s == "block" or s == "parry" then
+		p.want_face = yaw
+	elseif mx * mx + my * my > 0.01 then
+		p.want_face = combat.face_to(p.move_x, p.move_z)
+	end
+
+	if edges.dash then
+		combat.start_dash(p, p.move_x, p.move_z)
+	end
+	if edges.attack then
+		local was = p.state
+		if combat.start_attack(p) or was == "attack" then
+			if p.state == "attack" and p.t < 0.05 then
+				soft_lock(self, p)
+			end
+		end
+	end
+	combat.set_block(p, edges.block, input.block_held)
+
+	-- secondary: hold to aim, release to throw
+	if input.throw_held and p.state ~= "aim" and not self.throw_latched then
+		if combat.start_aim(p) then
+			self.aim_pitch = p.secondary.kind == "ranged" and 0.04 or 0.2
+			self.throw_latched = true
+		end
+	end
+	if p.state == "aim" then
+		if edges.throw_cancel then
+			combat.cancel_aim(p)
+		elseif not input.throw_held then
+			combat.release_aim(self.world, p, self.aim_pitch)
+		end
+	end
+	if not input.throw_held then
+		self.throw_latched = false
+	end
+
+	-- pickup
+	if p.secondary and p.secondary.kind == "throw" then
+		local cnt = combat.pickup(self.world, p, edges.pickup and combat.PICKUP_RADIUS or combat.AUTO_PICKUP_RADIUS)
+		if cnt > 0 then
+			gs.add_floater(p.x, 2.2, p.z, "+" .. cnt .. " дротик", "gold")
+		end
+	end
+end
+
+local function update_aim_arc(self)
+	local p = self.player
+	if p.state ~= "aim" then
+		if self.aim_visible then
+			for _, id in ipairs(self.aim_dots) do go.set_position(HIDDEN, id) end
+			self.aim_visible = false
+		end
+		return
+	end
+	self.aim_visible = true
+	local x, y, z = combat.hand_position(p)
+	local vx, vy, vz = combat.aim_velocity(p, self.aim_pitch)
+	local g = p.secondary.gravity or combat.GRAVITY
+	local step = p.secondary.kind == "ranged" and 0.04 or 0.07
+	for i, id in ipairs(self.aim_dots) do
+		local t = i * step
+		local py = y + vy * t - 0.5 * g * t * t
+		if py < 0 then
+			go.set_position(HIDDEN, id)
+		else
+			go.set_position(vmath.vector3(x + vx * t, py, z + vz * t), id)
+		end
+	end
+end
+
+-- Views ------------------------------------------------------------------------------
+
+local function rotation_from_velocity(vx, vy, vz)
+	local h = math.sqrt(vx * vx + vz * vz)
+	return vmath.quat_rotation_y(math.atan2(-vx, -vz)) * vmath.quat_rotation_x(math.atan2(vy, h))
+end
+
+local function sync_views(self, dt, real_dt)
+	self.frame = self.frame + 1
+	local p = self.player
+	for _, u in ipairs(self.world.units) do
+		local view = u.view
+		local y = 0
+		if not u.alive then
+			u.dead_time = (u.dead_time or 0) + dt
+			if u.dead_time > 1.8 then
+				y = -(u.dead_time - 1.8) * 0.8
+			end
+		end
+		go.set_position(vmath.vector3(u.x, y, u.z), view.root)
+		local dx, dz = u.x - p.x, u.z - p.z
+		local near = dx * dx + dz * dz < ANIM_NEAR * ANIM_NEAR
+		-- animation throttling: far crowd animates at half rate
+		if near or u.is_player then
+			builder.animate(view, u, dt, real_dt)
+			u.anim_acc = 0
+		else
+			u.anim_acc = (u.anim_acc or 0) + dt
+			u.parity = u.parity or math.random(0, 1)
+			if (self.frame + u.parity) % 2 == 0 then
+				builder.animate(view, u, u.anim_acc, real_dt * 2)
+				u.anim_acc = 0
+			end
+		end
+	end
+	for _, pr in ipairs(self.world.projectiles) do
+		local obj = pr.obj
+		if obj then
+			go.set_position(vmath.vector3(pr.x, pr.y, pr.z), obj.id)
+			if pr.state == "fly" then
+				pr.rot = rotation_from_velocity(pr.vx, pr.vy, pr.vz)
+				go.set_rotation(pr.rot, obj.id)
+			elseif pr.state == "loot" and not pr.landed_rot then
+				pr.landed_rot = true
+				local yaw = pr.rot and 0 or math.random() * 3
+				go.set_rotation(vmath.quat_rotation_y(yaw) * (pr.rot or vmath.quat()) * vmath.quat_rotation_x(-0.6), obj.id)
+			end
+		end
+	end
+end
+
+local function cleanup_dead(self)
+	local units = self.world.units
+	for i = #units, 1, -1 do
+		local u = units[i]
+		if not u.alive and not u.is_player and (u.dead_time or 0) > 3 then
+			pool.release(self.char_pool, u.pool_obj)
+			table.remove(units, i)
+		end
+	end
+end
+
+-- HUD sync ---------------------------------------------------------------------------
+
+local function update_hud(self)
+	local p = self.player
+	local hud = gs.hud
+	hud.hp, hud.hp_max = math.max(0, p.hp), p.max_hp
+	hud.stamina, hud.stamina_max = p.stamina, p.max_stamina
+	hud.ammo, hud.ammo_max = p.ammo or 0, p.ammo_max or 0
+	hud.reload = p.reload_t or 0
+	hud.secondary_title = p.secondary and p.secondary.title or ""
+	hud.aiming = p.state == "aim"
+	hud.aim_charge = p.charge or 0
+	hud.low_hp = p.hp < p.max_hp * 0.3
+	hud.melee_enabled = p.melee_enabled ~= false
+	hud.throw_enabled = p.throw_enabled ~= false and p.secondary ~= nil
+	hud.has_shield = p.shield ~= nil
+
+	local enemies = combat.alive_count(self.world, 2) + #(self.spawn_queue or {})
+	hud.enemies_left = enemies
+	if self.challenge then
+		if self.challenge.kills then
+			hud.objective = "Убито: " .. self.challenge_kills .. "/" .. self.challenge.kills
+		elseif self.challenge.survive then
+			hud.objective = "Осталось: " .. math.max(0, math.ceil(self.challenge.survive - self.challenge_time)) .. " сек"
+		end
+	else
+		hud.objective = "Врагов: " .. enemies
+	end
+
+	if self.boss and self.boss.alive then
+		hud.boss_name = self.boss.name
+		hud.boss_hp = self.boss.hp / self.boss.max_hp
+	else
+		hud.boss_name = nil
+	end
+
+	hud.prompt_pickup = false
+	if p.secondary and p.secondary.kind == "throw" then
+		local loot, d = combat.nearest_loot(self.world, p)
+		if loot and d <= combat.PICKUP_RADIUS then
+			hud.prompt_pickup = true
+		end
+	end
+end
+
+-- Tutorial hints (first launch only) -------------------------------------------------
+
+local HINTS_DESKTOP = {
+	"WASD — движение, мышь — камера (клик захватывает курсор)",
+	"ЛКМ — удар. Нажми дважды — комбо",
+	"ПКМ — парирование (со щитом — блок)",
+	"Пробел — рывок сквозь атаку",
+	"Shift/F — зажми, прицелься, отпусти — бросок. E — подобрать дротик",
+}
+local HINTS_MOBILE = {
+	"Левый джойстик — движение, свайп справа — камера",
+	"Кнопка с мечом — удар. Дважды — комбо",
+	"Щит — парирование / блок",
+	"Рывок — уклон сквозь атаку",
+	"Дротик — зажми и отпусти. Верни палец в центр — отмена",
+}
+
+local function update_hints(self, dt)
+	if not self.match.first then
+		gs.hud.hint = nil
+		return
+	end
+	self.hint_t = self.hint_t + dt
+	local hints = input.is_mobile and HINTS_MOBILE or HINTS_DESKTOP
+	local i = math.floor(self.hint_t / 5) + 1
+	gs.hud.hint = hints[i]
+end
+
+-- Requests from GUI -------------------------------------------------------------------
+
+local function revive(self)
+	local p = self.player
+	self.revived = true
+	p.alive = true
+	p.hp = p.max_hp
+	p.stamina = p.max_stamina
+	combat.set_state(p, "idle")
+	gs.hud.window = nil
+	gs.hud.can_revive = false
+	self.phase = "fight"
+	ads.gameplay_start()
+	for _, u in ipairs(self.world.units) do
+		if u.alive and u.team == 2 then
+			local dx, dz = u.x - p.x, u.z - p.z
+			local d = math.max(0.1, math.sqrt(dx * dx + dz * dz))
+			if d < 6 then
+				u.x, u.z = p.x + dx / d * 6, p.z + dz / d * 6
+			end
+			combat.stagger(u, 1.2)
+		end
+	end
+	burst(self, p.x, 1, p.z, "spark", 20, 6)
+	banner(self, "Второе дыхание!")
+end
+
+local function go_to_camp()
+	msg.post("main:/main#main", "goto", { scene = "camp" })
+end
+
+local function handle_requests(self)
+	for _, r in ipairs(gs.pop_requests()) do
+		local name = r.name
+		if name == "pause" then
+			if self.phase == "fight" or self.phase == "clear" then
+				self.paused = true
+				gs.hud.window = "pause"
+				ads.gameplay_stop()
+				input.reset()
+			end
+		elseif name == "resume" then
+			if gs.hud.window == "pause" then
+				self.paused = false
+				gs.hud.window = nil
+				ads.gameplay_start()
+			end
+		elseif name == "surrender" then
+			self.paused = false
+			finish_match(self, false)
+		elseif name == "revive" then
+			if gs.hud.can_revive then
+				gs.hud.can_revive = false
+				ads.rewarded(function(ok)
+					if ok then
+						revive(self)
+					else
+						gs.hud.can_revive = false
+					end
+				end)
+			end
+		elseif name == "give_up" then
+			finish_match(self, false)
+		elseif name == "double" then
+			local res = gs.hud.result
+			if res and res.can_double then
+				res.can_double = false
+				ads.rewarded(function(ok)
+					if ok then
+						profile.data.scrap = profile.data.scrap + res.scrap
+						profile.save()
+						res.lines[2] = "Металлолом: +" .. (res.scrap * 2) .. " (x2)"
+						res.changed = true
+					end
+				end)
+			end
+		elseif name == "to_camp" then
+			go_to_camp()
+		end
+	end
+end
+
+-- Lifecycle ------------------------------------------------------------------------------
+
+function init(self)
+	math.randomseed(os.time())
+	gs.reset_hud()
+	input.reset()
+	self.match = gs.next_match or { mode = "tournament", arena = 1 }
+	self.def = arenas_db.arenas[self.match.arena] or arenas_db.arenas[1]
+	self.challenge = self.match.mode == "challenge" and arenas_db.challenges[self.match.challenge] or nil
+	self.challenge_kills = 0
+	self.challenge_time = 0
+	self.reward = { scrap = 0, xp = 0, gears = 0, kills = 0, damage = 0 }
+	self.hitstop = 0
+	self.shake = 0
+	self.frame = 0
+	self.hint_t = 0
+	self.paused = false
+	self.revived = false
+	self.cam_yaw = 0
+	self.cam_pitch = 0.32
+	self.aim_pitch = 0.28
+
+	build_environment(self)
+	self.world = combat.new_world(self.def.radius, self.props)
+	create_pools(self)
+	make_player(self)
+	apply_challenge_rules(self)
+
+	self.phase = "intro"
+	self.intro_timer = self.match.first and 1.2 or 0.8
+	gs.hud.round_title = self.def.title
+	ads.gameplay_start()
+end
+
+function final(self)
+	ads.gameplay_stop()
+	input.reset()
+	if window.set_mouse_lock then
+		window.set_mouse_lock(false)
+	end
+end
+
+local function update_spawns(self, dt)
+	if self.challenge then
+		local ch = self.challenge
+		if ch.survive then
+			self.challenge_time = self.challenge_time + dt
+			if self.challenge_time >= ch.survive then
+				finish_match(self, true)
+				return
+			end
+		end
+		if ch.kills and self.challenge_kills >= ch.kills then
+			finish_match(self, true)
+			return
+		end
+		self.spawn_timer = (self.spawn_timer or 1) - dt
+		local keep = ch.survive and 3 or 3
+		if self.spawn_timer <= 0 and combat.alive_count(self.world, 2) < keep then
+			spawn_enemy(self, ch.enemy)
+			self.spawn_timer = 1.2
+		end
+		return
+	end
+	if #self.spawn_queue > 0 then
+		self.spawn_timer = self.spawn_timer - dt
+		if self.spawn_timer <= 0 then
+			spawn_enemy(self, table.remove(self.spawn_queue, 1))
+			self.spawn_timer = 0.7
+			if #self.spawn_queue == 0 then
+				timer.delay(1.5, false, function() open_gate(self, false) end)
+			end
+		end
+	elseif combat.alive_count(self.world, 2) == 0 then
+		on_round_cleared(self)
+	end
+end
+
+function update(self, dt)
+	dt = math.min(dt, 1 / 20)
+	handle_requests(self)
+
+	if self.paused then
+		update_hud(self)
+		return
+	end
+
+	if self.phase == "intro" then
+		self.intro_timer = self.intro_timer - dt
+		if self.intro_timer <= 0 then
+			start_round(self, 1)
+		end
+	elseif self.phase == "clear" then
+		self.clear_timer = self.clear_timer - dt
+		if self.clear_timer <= 0 then
+			start_round(self, self.round + 1)
+		end
+	elseif self.phase == "fight" then
+		update_spawns(self, dt)
+	end
+
+	update_player_input(self, dt)
+
+	-- hit stop: freeze the simulation for a few frames, camera keeps going
+	local sim_dt = dt
+	if self.hitstop > 0 then
+		self.hitstop = self.hitstop - dt
+		sim_dt = 0
+	end
+	if sim_dt > 0 and self.phase ~= "results" then
+		ai.update(self.world, self.player, sim_dt)
+		combat.step(self.world, sim_dt)
+	end
+	handle_events(self)
+	sync_views(self, sim_dt, dt)
+	update_aim_arc(self)
+	update_fx(self, dt)
+	cleanup_dead(self)
+	update_camera(self, dt)
+	update_hud(self)
+	update_hints(self, dt)
+end

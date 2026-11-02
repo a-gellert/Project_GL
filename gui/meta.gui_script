@@ -1,0 +1,360 @@
+-- Camp meta UI (Druid): resources bar, NPC menus (blacksmith, trainer, merchant)
+-- and the arena gate with tournament / survival / challenge selection.
+local druid = require("druid.druid")
+local ui = require("gui.ui_kit")
+local gs = require("modules.game_state")
+local profile = require("modules.profile")
+local stats = require("modules.stats_calculator")
+local ads = require("modules.ads")
+local weapons_db = require("data.weapons_db")
+local armor_db = require("data.armor_db")
+local arenas_db = require("data.arenas_db")
+
+local POPUP_W, POPUP_H = 1240, 820
+local ROW_H = 96
+
+local open_popup
+
+-- Helpers ---------------------------------------------------------------------------
+
+local function save_and_refresh(self)
+	profile.save()
+	gs.camp_player_dirty = true
+	self.refresh_top = true
+	open_popup(self, self.popup_kind, self.popup_arg)
+end
+
+local function can_pay(scrap, gears)
+	local d = profile.data
+	return d.scrap >= (scrap or 0) and d.gears >= (gears or 0)
+end
+
+local function pay(scrap, gears)
+	local d = profile.data
+	d.scrap = d.scrap - (scrap or 0)
+	d.gears = d.gears - (gears or 0)
+end
+
+local function price_label(scrap, gears)
+	local s = scrap .. " лома"
+	if gears and gears > 0 then s = s .. " + " .. gears .. " шест." end
+	return s
+end
+
+-- Row: title + description on the left, an action button on the right.
+local function add_row(self, m, index, title, desc, button_label, enabled, on_click, button_color)
+	local top = POPUP_H / 2 - 150
+	local y = top - (index - 1) * (ROW_H + 10)
+	ui.panel(m.panel, 0, y, POPUP_W - 60, ROW_H, ui.colors.panel_light)
+	ui.text(m.panel, -POPUP_W / 2 + 60, y + 18, title, 0.68, ui.colors.text, 700, 44, gui.PIVOT_W)
+	ui.text(m.panel, -POPUP_W / 2 + 60, y - 22, desc or "", 0.5, ui.colors.text_dim, 760, 36, gui.PIVOT_W)
+	if button_label then
+		local b = ui.modal_button(self.druid, m, nil, POPUP_W / 2 - 200, y, 300, 72, button_label,
+			button_color or ui.colors.button, on_click, 0.55)
+		ui.set_button_enabled(b, enabled, button_color)
+		return b
+	end
+end
+
+local function add_close(self, m)
+	ui.modal_button(self.druid, m, nil, POPUP_W / 2 - 60, POPUP_H / 2 - 50, 70, 70, "X", ui.colors.button_red, function()
+		open_popup(self, nil)
+	end, 0.8)
+end
+
+local function add_tabs(self, m, tabs, current, on_select)
+	local w = (POPUP_W - 80) / #tabs
+	for i, tab in ipairs(tabs) do
+		local x = -POPUP_W / 2 + 40 + w * (i - 0.5)
+		local color = tab.id == current and ui.colors.button or ui.colors.button_gray
+		ui.modal_button(self.druid, m, nil, x, POPUP_H / 2 - 110, w - 12, 60, tab.title, color, function()
+			on_select(tab.id)
+		end, 0.55)
+	end
+end
+
+-- Match start -------------------------------------------------------------------------
+
+local function start_match(self, match)
+	gs.next_match = match
+	gs.camp_focus = nil
+	local d = profile.data
+	local go_now = function()
+		msg.post("main:/main#main", "goto", { scene = "arena" })
+	end
+	-- interstitial strictly between fights, not more often than every 3 fights
+	if d.fights_since_ad >= 3 then
+		d.fights_since_ad = 0
+		profile.save()
+		ads.interstitial(go_now)
+	else
+		go_now()
+	end
+end
+
+-- Popups --------------------------------------------------------------------------------
+
+local function build_trainer(self, m)
+	local d = profile.data
+	local st = profile.stats()
+	ui.text(m.panel, 0, POPUP_H / 2 - 105, "Свободные очки: " .. d.stat_points .. "  (10 за уровень)", 0.6, ui.colors.text, 900, 40)
+	local rows = {
+		{ id = "hp", title = "Живучесть (HP): " .. st.hp, desc = "+1 к здоровью за очко" },
+		{ id = "str", title = "Сила (STR): " .. st.str, desc = string.format("Урон ближнего боя x%.2f", (1 + st.str / 100) * (1 + st.agi / 150)) },
+		{ id = "agi", title = "Ловкость (AGI): " .. st.agi, desc = string.format("Скорость +%d%%, замах x%.2f, выносливость %d",
+			math.floor((stats.get_move_speed(1, st.agi) - 1) * 100 + 0.5), stats.get_attack_rate(st.agi), stats.get_max_stamina(st.agi)) },
+	}
+	for i, r in ipairs(rows) do
+		local n = d.stat_points >= 5 and 5 or 1
+		add_row(self, m, i + 0.5, r.title, r.desc, "+" .. n, d.stat_points > 0, function()
+			local amount = math.min(n, profile.data.stat_points)
+			profile.data.points[r.id] = profile.data.points[r.id] + amount
+			profile.data.stat_points = profile.data.stat_points - amount
+			save_and_refresh(self)
+		end, ui.colors.button_green)
+	end
+	add_row(self, m, 4.5, "Тренировочный спарринг 1 на 1", "Бой с рейдером без риска. Опыт за победу.", "В ринг", true, function()
+		start_match(self, { mode = "sparring", arena = 1 })
+	end, ui.colors.button_blue)
+	local melee = weapons_db.get(d.melee)
+	ui.text(m.panel, 0, -POPUP_H / 2 + 60, string.format("Уровень %d  •  Оружие: %s  •  Броня: %s",
+		d.level, melee.title, armor_db.get(d.armor).title), 0.55, ui.colors.text_dim, 1100, 40)
+end
+
+local function build_blacksmith(self, m)
+	local d = profile.data
+	local idx = 1
+	for _, wid in ipairs({ d.melee, d.secondary }) do
+		local w = weapons_db.get(wid)
+		local lvl = profile.upgrade_level(wid)
+		local cost = weapons_db.upgrade_cost(lvl)
+		local cur = math.floor(w.damage * (1 + lvl * weapons_db.UPGRADE_DAMAGE))
+		local nxt = math.floor(w.damage * (1 + (lvl + 1) * weapons_db.UPGRADE_DAMAGE))
+		local maxed = lvl >= weapons_db.UPGRADE_MAX
+		add_row(self, m, idx, w.title .. "  [" .. lvl .. "/" .. weapons_db.UPGRADE_MAX .. "]",
+			maxed and ("Урон " .. cur .. " — максимум") or ("Урон " .. cur .. " » " .. nxt),
+			maxed and "Макс." or ("Улучшить: " .. cost), not maxed and can_pay(cost), function()
+				pay(cost)
+				profile.data.upgrades[wid] = lvl + 1
+				save_and_refresh(self)
+			end)
+		idx = idx + 1
+	end
+	for _, mod_id in ipairs(weapons_db.mod_order) do
+		local mod = weapons_db.mods[mod_id]
+		local owned = profile.has_mod(mod_id)
+		add_row(self, m, idx, mod.title, mod.desc, owned and "Установлено" or price_label(mod.price, mod.gears),
+			not owned and can_pay(mod.price, mod.gears), function()
+				pay(mod.price, mod.gears)
+				profile.data.mods[mod_id] = true
+				save_and_refresh(self)
+			end, ui.colors.button_blue)
+		idx = idx + 1
+	end
+end
+
+local MERCHANT_TABS = {
+	{ id = "melee", title = "Оружие" },
+	{ id = "secondary", title = "Метательное" },
+	{ id = "shield", title = "Щиты" },
+	{ id = "armor", title = "Броня" },
+}
+
+local function merchant_items(tab)
+	local items = {}
+	if tab == "melee" then
+		for _, id in ipairs(weapons_db.melee_order) do
+			local w = weapons_db.get(id)
+			items[#items + 1] = { id = id, title = w.title, price = w.price, slot = "melee",
+				desc = "Урон " .. w.damage .. ", дальность " .. w.range .. (w.bleed_chance and ", кровотечение" or "") }
+		end
+	elseif tab == "secondary" then
+		for _, id in ipairs(weapons_db.secondary_order) do
+			local w = weapons_db.get(id)
+			local desc = w.kind == "ranged" and ("Урон " .. w.damage .. ", перезарядка " .. w.reload .. " c")
+				or ("Урон " .. w.damage .. ", запас " .. w.ammo .. " шт, подбираются")
+			items[#items + 1] = { id = id, title = w.title, price = w.price, slot = "secondary", desc = desc }
+		end
+	elseif tab == "shield" then
+		for _, id in ipairs(weapons_db.shield_order) do
+			local s = weapons_db.shields[id]
+			items[#items + 1] = { id = id, title = s.title, price = s.price, slot = "shield",
+				desc = "Блок " .. math.floor(s.block * 100) .. "% урона спереди" }
+		end
+		items[#items + 1] = { id = "", title = "Без щита", price = 0, slot = "shield", desc = "Парирование: окно 0.4 с, оглушает врага", free = true }
+	else
+		for _, id in ipairs(armor_db.order) do
+			local a = armor_db.armors[id]
+			items[#items + 1] = { id = id, title = a.title, price = a.price, gears = a.gears, slot = "armor",
+				desc = "Поглощение " .. math.floor(a.armor * 100) .. "% урона" }
+		end
+	end
+	return items
+end
+
+local function build_merchant(self, m, tab)
+	tab = tab or "melee"
+	add_tabs(self, m, MERCHANT_TABS, tab, function(id)
+		open_popup(self, "merchant", id)
+	end)
+	local d = profile.data
+	for i, it in ipairs(merchant_items(tab)) do
+		local owned = it.free or profile.owns(it.id)
+		local equipped = d[it.slot] == it.id
+		local label, enabled, color
+		if equipped then
+			label, enabled, color = "Надето", false, ui.colors.button_gray
+		elseif owned then
+			label, enabled, color = "Надеть", true, ui.colors.button_green
+		else
+			label, enabled, color = price_label(it.price, it.gears), can_pay(it.price, it.gears), ui.colors.button
+		end
+		add_row(self, m, i + 0.6, it.title, it.desc, label, enabled, function()
+			if not owned then
+				pay(it.price, it.gears)
+				profile.data.owned[it.id] = true
+			end
+			profile.data[it.slot] = it.id
+			save_and_refresh(self)
+		end, color)
+	end
+end
+
+local function build_gate(self, m)
+	local d = profile.data
+	ui.text(m.panel, 0, POPUP_H / 2 - 105, "Опыт пустоши: " .. d.total_xp, 0.6, ui.colors.text, 900, 40)
+	-- rows start half a row lower to leave room for the header line
+	local idx = 1.5
+	for i, a in ipairs(arenas_db.arenas) do
+		local unlocked = arenas_db.is_unlocked(i, d.total_xp)
+		local desc = unlocked and ("Серия 5 раундов + разрядка. Награда " .. a.win_credits .. " лома")
+			or ("Закрыто: нужно " .. a.required_xp .. " опыта")
+		add_row(self, m, idx, a.title, desc, "Турнир", unlocked, function()
+			start_match(self, { mode = "tournament", arena = i })
+		end, ui.colors.button)
+		-- survival button next to the tournament one
+		local top = POPUP_H / 2 - 150
+		local y = top - (idx - 1) * (ROW_H + 10)
+		local b = ui.modal_button(self.druid, m, nil, POPUP_W / 2 - 520, y, 280, 72, "Выживание", ui.colors.button_blue, function()
+			start_match(self, { mode = "survival", arena = i })
+		end, 0.55)
+		ui.set_button_enabled(b, unlocked, ui.colors.button_blue)
+		idx = idx + 1
+	end
+	for _, ch_id in ipairs(arenas_db.challenge_order) do
+		local ch = arenas_db.challenges[ch_id]
+		add_row(self, m, idx, "Испытание: " .. ch.title, ch.desc .. "  Награда: " .. ch.reward_gears .. " шест.",
+			"Начать", true, function()
+				start_match(self, { mode = "challenge", arena = 1, challenge = ch_id })
+			end, ui.colors.button_green)
+		idx = idx + 1
+	end
+end
+
+local POPUPS = {
+	trainer = { title = "Тренер Кассий", build = build_trainer },
+	blacksmith = { title = "Кузнец Вулкан — верстак", build = build_blacksmith },
+	merchant = { title = "Торговец Шайтан", build = build_merchant },
+	gate = { title = "Ворота арены", build = build_gate },
+}
+
+open_popup = function(self, kind, arg)
+	ui.close_modal(self.druid, self.modal)
+	self.modal = nil
+	self.popup_kind = kind
+	self.popup_arg = arg
+	gs.camp_focus = kind
+	gui.set_enabled(self.bottom, kind == nil)
+	if not kind then return end
+	local p = POPUPS[kind]
+	local m = ui.modal(self.druid, POPUP_W, POPUP_H, p.title)
+	-- the 3D NPC stays visible behind a lighter shade
+	gui.set_color(m.shade, vmath.vector4(0, 0, 0, 0.25))
+	gui.set_position(m.panel, vmath.vector3(0, -40, 0))
+	add_close(self, m)
+	p.build(self, m, arg)
+	self.modal = m
+end
+
+-- Top bar -------------------------------------------------------------------------------------
+
+local function refresh_top(self)
+	local d = profile.data
+	self.level_text:set_text("Ур. " .. d.level)
+	self.xp_bar.progress:set_to(d.xp / profile.xp_to_next(d.level))
+	self.scrap_text:set_text("Лом: " .. d.scrap)
+	self.gears_text:set_text("Шестерни: " .. d.gears)
+	self.points_text:set_text(d.stat_points > 0 and ("Очки: " .. d.stat_points .. " » Тренер") or "")
+end
+
+local function create_ui(self)
+	local tl = ui.anchor(0, 1080, gui.ANCHOR_LEFT, gui.ANCHOR_TOP)
+	ui.panel(tl, 24, -70, 1180, 100, vmath.vector4(0, 0, 0, 0.45), gui.PIVOT_W)
+	self.level_text = self.druid:new_text(ui.text(tl, 50, -70, "", 0.8, ui.colors.gold, 170, 50, gui.PIVOT_W), "")
+	self.xp_bar = ui.bar(self.druid, tl, 220, -70, 260, 22, ui.colors.xp)
+	self.scrap_text = self.druid:new_text(ui.text(tl, 510, -70, "", 0.65, ui.colors.text, 260, 50, gui.PIVOT_W), "")
+	self.gears_text = self.druid:new_text(ui.text(tl, 760, -70, "", 0.65, ui.colors.text, 230, 50, gui.PIVOT_W), "")
+	self.points_text = self.druid:new_text(ui.text(tl, 990, -70, "", 0.55, ui.colors.stamina, 220, 50, gui.PIVOT_W), "")
+
+	local bottom = ui.anchor(960, 0, nil, gui.ANCHOR_BOTTOM)
+	self.bottom = bottom
+	local entries = {
+		{ "Кузнец", "blacksmith", ui.colors.button },
+		{ "Тренер", "trainer", ui.colors.button_blue },
+		{ "Торговец", "merchant", ui.colors.button },
+	}
+	for i, e in ipairs(entries) do
+		ui.button(self.druid, bottom, -660 + (i - 1) * 330, 100, 300, 110, e[1], e[3], function()
+			open_popup(self, e[2])
+		end, 0.8)
+	end
+	ui.button(self.druid, bottom, 520, 110, 440, 140, "НА АРЕНУ", ui.colors.button_red, function()
+		open_popup(self, "gate")
+	end, 1.1)
+
+	local res = gs.last_result
+	if res then
+		gs.last_result = nil
+		local toast = ui.panel(nil, 960, 900, 900, 90, vmath.vector4(0, 0, 0, 0.6))
+		ui.text(toast, 0, 0, res.title .. "  •  лом +" .. (res.scrap or 0), 0.8,
+			res.victory and ui.colors.gold or ui.colors.hp, 860, 70)
+		gui.animate(toast, "position.y", 1200, gui.EASING_INBACK, 0.5, 3.5, function()
+			gui.delete_node(toast)
+		end)
+	end
+end
+
+function init(self)
+	msg.post(".", "acquire_input_focus")
+	self.druid = druid.new(self)
+	self.druid:new_back_handler(function()
+		if self.popup_kind then open_popup(self, nil) end
+	end)
+	create_ui(self)
+	refresh_top(self)
+	gs.camp_focus = nil
+end
+
+function final(self)
+	self.druid:final()
+end
+
+function update(self, dt)
+	self.druid:update(dt)
+	if self.refresh_top then
+		self.refresh_top = false
+		refresh_top(self)
+	end
+end
+
+function on_message(self, message_id, message, sender)
+	self.druid:on_message(message_id, message, sender)
+end
+
+function on_input(self, action_id, action)
+	if action_id == hash("key_esc") and action.released and self.popup_kind then
+		open_popup(self, nil)
+		return true
+	end
+	return self.druid:on_input(action_id, action)
+end

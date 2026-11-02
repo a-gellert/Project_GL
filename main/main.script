@@ -1,0 +1,51 @@
+-- Scene switcher: camp hub <-> arena, through collection proxies.
+-- First launch skips the menu entirely (zero friction): straight into the arena.
+local profile = require("modules.profile")
+local gs = require("modules.game_state")
+
+local PROXIES = {
+	camp = "#camp_proxy",
+	arena = "#arena_proxy",
+}
+
+local function load_scene(self, name)
+	if self.current then
+		self.pending = name
+		msg.post(PROXIES[self.current], "unload")
+		return
+	end
+	self.current = name
+	self.loading = true
+	msg.post(PROXIES[name], "async_load")
+end
+
+function init(self)
+	msg.post(".", "acquire_input_focus")
+	profile.load()
+	if not profile.data.tutorial_done then
+		gs.next_match = { mode = "tournament", arena = 1, first = true }
+		load_scene(self, "arena")
+	else
+		load_scene(self, "camp")
+	end
+end
+
+function on_message(self, message_id, message, sender)
+	if message_id == hash("goto") then
+		if self.loading or self.pending then
+			return
+		end
+		load_scene(self, message.scene)
+	elseif message_id == hash("proxy_loaded") then
+		msg.post(sender, "init")
+		msg.post(sender, "enable")
+		self.loading = false
+	elseif message_id == hash("proxy_unloaded") then
+		self.current = nil
+		local next_scene = self.pending
+		self.pending = nil
+		if next_scene then
+			load_scene(self, next_scene)
+		end
+	end
+end

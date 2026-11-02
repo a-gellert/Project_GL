@@ -1,0 +1,21 @@
+{
+  "bob_arguments" : {
+    "sha1" : "a81dbb0478e8b73931dc2d671563204f6ac0ef82",
+    "version" : "1.14.0",
+    "timestamp" : "2026-10-12 11:39:45"
+  },
+  "defold_sdk" : "a81dbb0478e8b73931dc2d671563204f6ac0ef82",
+  "dependencies" : [ {
+    "url" : "https://github.com/defold/extension-poki-sdk/archive/refs/heads/main.zip",
+    "commit-sha1" : "3e0c3296e6c4a27b99387d9c54d06626daa94b89",
+    "payload-sha1" : "afb7d4dba5ab581827e0a15961a335acc9f5fc6a"
+  }, {
+    "url" : "https://github.com/Insality/druid/archive/refs/tags/1.2.1.zip",
+    "commit-sha1" : "64029a4bbd98a48c8dc372d59df8329fa55d95c1",
+    "payload-sha1" : "73c25c3d24c7807b506843ca6f9b4d059c6f59da"
+  }, {
+    "url" : "https://github.com/Insality/defold-event/archive/refs/tags/14.zip",
+    "commit-sha1" : "3e841089340598d428bacb2acd349afa2d6e6ccf",
+    "payload-sha1" : "654486e5e5b9786a29a7bf79ec37b622639f7803"
+  } ]
+}

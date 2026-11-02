@@ -1,0 +1,489 @@
+-- Combat HUD. Druid: bars, texts, pause/result windows, back handler.
+-- Touch controls (joystick, action buttons, camera swipe) are handled with raw
+-- multitouch here because they must work with several fingers at once.
+local druid = require("druid.druid")
+local ui = require("gui.ui_kit")
+local gs = require("modules.game_state")
+local input = require("modules.input_adapter")
+
+local FLOATER_COUNT = 24
+local FLOATER_TIME = 0.9
+local STICK_RADIUS = 120
+
+local FLOATER_COLORS = {
+	white = vmath.vector4(1, 1, 1, 1),
+	hp_red = vmath.vector4(1, 0.35, 0.3, 1),
+	gold = vmath.vector4(1, 0.82, 0.3, 1),
+	blue = vmath.vector4(0.5, 0.8, 1, 1),
+	gray = vmath.vector4(0.8, 0.8, 0.8, 1),
+	dot = vmath.vector4(1, 0.55, 0.3, 1),
+}
+
+local H_MOVE_UP = hash("move_up")
+local H_MOVE_DOWN = hash("move_down")
+local H_MOVE_LEFT = hash("move_left")
+local H_MOVE_RIGHT = hash("move_right")
+local H_CAM_LEFT = hash("cam_left")
+local H_CAM_RIGHT = hash("cam_right")
+local H_DASH = hash("dash")
+local H_PICKUP = hash("pickup")
+local H_THROW = hash("throw")
+local H_BLOCK = hash("block")
+local H_TOUCH = hash("touch")
+local H_TOUCH_MULTI = hash("touch_multi")
+local H_ESC = hash("key_esc")
+
+local KEY_MAP = {
+	[H_MOVE_UP] = "up", [H_MOVE_DOWN] = "down", [H_MOVE_LEFT] = "left", [H_MOVE_RIGHT] = "right",
+	[H_CAM_LEFT] = "cam_left", [H_CAM_RIGHT] = "cam_right",
+}
+
+-- Layout ------------------------------------------------------------------------
+
+local function create_hud(self)
+	local tl = ui.anchor(0, 1080, gui.ANCHOR_LEFT, gui.ANCHOR_TOP)
+	ui.panel(tl, 24, -96, 520, 150, vmath.vector4(0, 0, 0, 0.35), gui.PIVOT_W)
+	self.hp_bar = ui.bar(self.druid, tl, 40, -50, 480, 38, ui.colors.hp)
+	self.hp_text = self.druid:new_text(ui.text(self.hp_bar.bg, 240, 0, "100/100", 0.6, ui.colors.text, 460, 36), "")
+	self.st_bar = ui.bar(self.druid, tl, 40, -92, 380, 18, ui.colors.stamina)
+	self.ammo_text = self.druid:new_text(ui.text(tl, 40, -135, "", 0.6, ui.colors.text, 600, 40, gui.PIVOT_W), "")
+
+	local tc = ui.anchor(960, 1080, nil, gui.ANCHOR_TOP)
+	self.round_text = self.druid:new_text(ui.text(tc, 0, -45, "", 0.9, ui.colors.gold, 900, 60), "")
+	self.objective_text = self.druid:new_text(ui.text(tc, 0, -95, "", 0.6, ui.colors.text, 700, 40), "")
+	self.boss_root = ui.box(tc, 0, -165, 1, 1, ui.colors.transparent)
+	self.boss_name = self.druid:new_text(ui.text(self.boss_root, 0, 28, "", 0.65, ui.colors.text, 700, 40), "")
+	self.boss_bar = ui.bar(self.druid, self.boss_root, -360, -8, 720, 26, ui.colors.hp)
+	gui.set_enabled(self.boss_root, false)
+
+	local tr = ui.anchor(1920, 1080, gui.ANCHOR_RIGHT, gui.ANCHOR_TOP)
+	self.pause_button = ui.button(self.druid, tr, -70, -64, 96, 96, "II", ui.colors.button_gray, function()
+		gs.push_request("pause")
+	end, 1)
+
+	self.banner = ui.text(nil, 960, 760, "", 1.7, ui.colors.gold, 1600, 120)
+	gui.set_enabled(self.banner, false)
+	self.hint = ui.multiline(nil, 960, 215, "", 0.7, ui.colors.text, 1500, 100)
+
+	self.prompt = ui.text(nil, 960, 360, "E — подобрать", 0.7, ui.colors.gold, 800, 50)
+	gui.set_enabled(self.prompt, false)
+	self.charge_bar = ui.bar(self.druid, nil, 860, 300, 200, 14, ui.colors.stamina)
+	gui.set_enabled(self.charge_bar.bg, false)
+
+	self.vignette = ui.box(nil, 960, 540, 4000, 4000, vmath.vector4(0.6, 0, 0, 0))
+
+	self.floaters = {}
+	for i = 1, FLOATER_COUNT do
+		local n = ui.text(nil, 0, 0, "", 0.7, ui.colors.text)
+		gui.set_enabled(n, false)
+		self.floaters[i] = { node = n, t = 0, active = false }
+	end
+	self.floater_next = 1
+end
+
+-- Mobile controls ---------------------------------------------------------------------
+
+local function make_touch_button(parent, x, y, size, label, color)
+	local n = ui.circle(ui.box(parent, x, y, size, size, color))
+	ui.text(n, 0, 0, label, 0.6, ui.colors.text, size - 10, 50)
+	return n
+end
+
+local function create_mobile_controls(self)
+	if self.mobile_roots then return end
+	local bl = ui.anchor(0, 0, gui.ANCHOR_LEFT, gui.ANCHOR_BOTTOM)
+	local br = ui.anchor(1920, 0, gui.ANCHOR_RIGHT, gui.ANCHOR_BOTTOM)
+	self.mobile_roots = { bl, br }
+	self.stick_base = ui.circle(ui.box(bl, 250, 250, STICK_RADIUS * 2, STICK_RADIUS * 2, vmath.vector4(1, 1, 1, 0.15)))
+	self.stick_knob = ui.circle(ui.box(self.stick_base, 0, 0, 110, 110, vmath.vector4(1, 1, 1, 0.45)))
+
+	self.touch_buttons = {
+		attack = make_touch_button(br, -230, 230, 230, "УДАР", vmath.vector4(0.75, 0.3, 0.2, 0.75)),
+		block = make_touch_button(br, -480, 150, 160, "ЩИТ", vmath.vector4(0.3, 0.45, 0.7, 0.7)),
+		throw = make_touch_button(br, -450, 390, 160, "ДРОТИК", vmath.vector4(0.7, 0.55, 0.2, 0.7)),
+		dash = make_touch_button(br, -230, 480, 140, "РЫВОК", vmath.vector4(0.4, 0.4, 0.4, 0.7)),
+		pickup = make_touch_button(br, -680, 300, 140, "ВЗЯТЬ", vmath.vector4(0.3, 0.6, 0.3, 0.8)),
+	}
+	self.touches = {}
+end
+
+local function set_mobile(self, on)
+	input.is_mobile = on
+	if on then
+		create_mobile_controls(self)
+		if window.set_mouse_lock then window.set_mouse_lock(false) end
+	end
+	for _, n in ipairs(self.mobile_roots or {}) do
+		gui.set_enabled(n, on)
+	end
+	gui.set_text(self.prompt, on and "" or "E — подобрать")
+end
+
+local function screen_scale()
+	local w, h = window.get_size()
+	return math.min(w / 1920, h / 1080)
+end
+
+local function update_stick(self, touch)
+	local c = gui.get_screen_position(self.stick_base)
+	local r = STICK_RADIUS * screen_scale()
+	local dx, dy = touch.screen_x - c.x, touch.screen_y - c.y
+	local len = math.sqrt(dx * dx + dy * dy)
+	if len > r then
+		dx, dy = dx / len * r, dy / len * r
+	end
+	input.stick_x, input.stick_y = dx / r, dy / r
+	gui.set_position(self.stick_knob, vmath.vector3(input.stick_x * STICK_RADIUS, input.stick_y * STICK_RADIUS, 0))
+end
+
+local function release_stick(self)
+	input.stick_x, input.stick_y = 0, 0
+	gui.set_position(self.stick_knob, vmath.vector3(0, 0, 0))
+end
+
+local function touch_role(self, touch)
+	for name, node in pairs(self.touch_buttons) do
+		if gui.is_enabled(node, true) and gui.pick_node(node, touch.x, touch.y) then
+			return name
+		end
+	end
+	local w = window.get_size()
+	if touch.screen_x < w * 0.45 then
+		return "stick"
+	end
+	return "look"
+end
+
+local function on_multitouch(self, action)
+	for _, touch in ipairs(action.touch) do
+		local id = touch.id
+		local t = self.touches[id]
+		if touch.pressed and not t then
+			local role = touch_role(self, touch)
+			t = { role = role, x = touch.screen_x, y = touch.screen_y, sx = touch.screen_x, sy = touch.screen_y, moved = false }
+			self.touches[id] = t
+			if role == "stick" then
+				update_stick(self, touch)
+			elseif role == "attack" then
+				input.press("attack")
+			elseif role == "block" then
+				input.press("block")
+				input.block_held = true
+			elseif role == "throw" then
+				input.throw_held = true
+			elseif role == "dash" then
+				input.press("dash")
+			elseif role == "pickup" then
+				input.press("pickup")
+			end
+		elseif t and touch.released then
+			if t.role == "stick" then
+				release_stick(self)
+			elseif t.role == "block" then
+				input.block_held = false
+			elseif t.role == "throw" then
+				-- dragging back to the button centre cancels the throw
+				local c = gui.get_screen_position(self.touch_buttons.throw)
+				local dx, dy = touch.screen_x - c.x, touch.screen_y - c.y
+				if t.moved and dx * dx + dy * dy < (40 * screen_scale()) ^ 2 then
+					input.press("throw_cancel")
+				end
+				input.throw_held = false
+			end
+			self.touches[id] = nil
+		elseif t then
+			local dx, dy = touch.screen_x - t.x, touch.screen_y - t.y
+			t.x, t.y = touch.screen_x, touch.screen_y
+			if t.role == "stick" then
+				update_stick(self, touch)
+			elseif t.role == "look" or t.role == "throw" then
+				-- dragging from the throw button aims like a swipe
+				local k = 1.6 / math.max(screen_scale(), 0.3)
+				input.add_look(dx * k * 0.5, dy * k * 0.5)
+				local mx, my = touch.screen_x - t.sx, touch.screen_y - t.sy
+				if mx * mx + my * my > (60 * screen_scale()) ^ 2 then
+					t.moved = true
+				end
+			end
+		end
+	end
+end
+
+-- Windows -----------------------------------------------------------------------------
+
+local function close_window(self)
+	ui.close_modal(self.druid, self.modal)
+	self.modal = nil
+end
+
+local function open_window(self, kind)
+	close_window(self)
+	self.window_kind = kind
+	if not kind then return end
+	if window.set_mouse_lock then window.set_mouse_lock(false) end
+	if kind == "pause" then
+		local m = ui.modal(self.druid, 640, 420, "Пауза")
+		ui.modal_button(self.druid, m, nil, 0, 40, 420, 90, "Продолжить", ui.colors.button_green, function()
+			gs.push_request("resume")
+		end)
+		ui.modal_button(self.druid, m, nil, 0, -80, 420, 90, "Сдаться (в лагерь)", ui.colors.button_red, function()
+			gs.push_request("surrender")
+		end)
+		self.modal = m
+	elseif kind == "defeat" then
+		local m = ui.modal(self.druid, 700, 460, "Ты пал на арене")
+		ui.multiline(m.panel, 0, 90, "Толпа требует продолжения!", 0.7, ui.colors.text, 600, 80)
+		if gs.hud.can_revive then
+			ui.modal_button(self.druid, m, nil, 0, -20, 520, 100, "Воскреснуть (реклама)", ui.colors.button_green, function()
+				gs.push_request("revive")
+			end)
+		end
+		ui.modal_button(self.druid, m, nil, 0, -150, 520, 90, "Забрать награду", ui.colors.button_gray, function()
+			gs.push_request("give_up")
+		end)
+		self.modal = m
+	elseif kind == "results" then
+		local res = gs.hud.result or { title = "", lines = {} }
+		local h = 300 + #res.lines * 56 + 120
+		local m = ui.modal(self.druid, 760, h, res.title)
+		gui.set_color(m.title, res.victory and ui.colors.gold or ui.colors.hp)
+		self.result_lines = {}
+		for i, line in ipairs(res.lines) do
+			self.result_lines[i] = ui.text(m.panel, 0, h / 2 - 130 - (i - 1) * 56, line, 0.7, ui.colors.text, 680, 50)
+		end
+		local y = -h / 2 + 170
+		if res.can_double then
+			self.double_button = ui.modal_button(self.druid, m, nil, 0, y, 560, 90, "x2 металлолом (реклама)", ui.colors.button_green, function()
+				gs.push_request("double")
+				ui.set_button_enabled(self.double_button, false)
+			end)
+		end
+		ui.modal_button(self.druid, m, nil, 0, -h / 2 + 70, 560, 90, "В лагерь", ui.colors.button, function()
+			gs.push_request("to_camp")
+		end)
+		self.modal = m
+	end
+end
+
+-- Floaters ------------------------------------------------------------------------------
+
+local function project(x, y, z)
+	local vp = gs.hud.view_proj
+	if not vp then return nil end
+	local p = vp * vmath.vector4(x, y, z, 1)
+	if p.w <= 0.01 then return nil end
+	local sx = (p.x / p.w + 1) * 0.5 * gs.hud.win_w
+	local sy = (p.y / p.w + 1) * 0.5 * gs.hud.win_h
+	return vmath.vector3(sx, sy, 0)
+end
+
+local function spawn_floaters(self)
+	local list = gs.hud.floaters
+	if #list == 0 then return end
+	for _, f in ipairs(list) do
+		local slot = self.floaters[self.floater_next]
+		self.floater_next = self.floater_next % FLOATER_COUNT + 1
+		slot.active = true
+		slot.t = 0
+		slot.x, slot.y, slot.z = f.x + (math.random() - 0.5) * 0.4, f.y, f.z
+		slot.color = FLOATER_COLORS[f.color] or FLOATER_COLORS.white
+		gui.set_text(slot.node, f.text)
+		gui.set_enabled(slot.node, true)
+	end
+	gs.hud.floaters = {}
+end
+
+local function update_floaters(self, dt)
+	for _, f in ipairs(self.floaters) do
+		if f.active then
+			f.t = f.t + dt
+			local pos = f.t < FLOATER_TIME and project(f.x, f.y + f.t * 1.2, f.z)
+			if not pos then
+				f.active = false
+				gui.set_enabled(f.node, false)
+			else
+				gui.set_screen_position(f.node, pos)
+				local c = f.color
+				gui.set_color(f.node, vmath.vector4(c.x, c.y, c.z, 1 - (f.t / FLOATER_TIME) ^ 2))
+				local s = 0.7 + math.max(0, 0.25 - f.t) * 1.5
+				gui.set_scale(f.node, vmath.vector3(s, s, 1))
+			end
+		end
+	end
+end
+
+-- Lifecycle --------------------------------------------------------------------------------
+
+function init(self)
+	msg.post(".", "acquire_input_focus")
+	self.druid = druid.new(self)
+	self.druid:new_back_handler(function()
+		if self.window_kind == "pause" then
+			gs.push_request("resume")
+		elseif not self.window_kind then
+			gs.push_request("pause")
+		end
+	end)
+	create_hud(self)
+	self.banner_id = 0
+	self.banner_t = 0
+	self.window_kind = nil
+	self.was_locked = false
+	set_mobile(self, input.detect_mobile())
+end
+
+function final(self)
+	self.druid:final()
+	input.reset()
+end
+
+function update(self, dt)
+	self.druid:update(dt)
+	local hud = gs.hud
+
+	self.hp_bar.progress:set_to(hud.hp_max > 0 and hud.hp / hud.hp_max or 0)
+	self.hp_text:set_text(math.ceil(hud.hp) .. " / " .. math.floor(hud.hp_max))
+	self.st_bar.progress:set_to(hud.stamina_max > 0 and hud.stamina / hud.stamina_max or 0)
+	if hud.secondary_title ~= "" then
+		local s = hud.secondary_title .. ": " .. hud.ammo .. "/" .. hud.ammo_max
+		if hud.reload > 0 then s = hud.secondary_title .. ": перезарядка..." end
+		self.ammo_text:set_text(s)
+	end
+	self.round_text:set_text(hud.round_title or "")
+	self.objective_text:set_text(hud.objective or "")
+
+	gui.set_enabled(self.boss_root, hud.boss_name ~= nil)
+	if hud.boss_name then
+		self.boss_name:set_text(hud.boss_name)
+		self.boss_bar.progress:set_to(math.max(0, hud.boss_hp))
+	end
+
+	-- banner
+	if hud.banner_id ~= self.banner_id then
+		self.banner_id = hud.banner_id
+		self.banner_t = 2.2
+		gui.set_text(self.banner, hud.banner or "")
+		gui.set_enabled(self.banner, true)
+		gui.set_scale(self.banner, vmath.vector3(2.4, 2.4, 1))
+		gui.animate(self.banner, "scale", vmath.vector3(1.7, 1.7, 1), gui.EASING_OUTBACK, 0.35)
+	end
+	if self.banner_t > 0 then
+		self.banner_t = self.banner_t - dt
+		local a = math.min(1, self.banner_t / 0.4)
+		gui.set_color(self.banner, vmath.vector4(1, 0.82, 0.3, a))
+		if self.banner_t <= 0 then gui.set_enabled(self.banner, false) end
+	end
+
+	gui.set_text(self.hint, hud.hint or "")
+	gui.set_enabled(self.prompt, hud.prompt_pickup and not input.is_mobile)
+	gui.set_enabled(self.charge_bar.bg, hud.aiming)
+	if hud.aiming then
+		self.charge_bar.progress:set_to(hud.aim_charge)
+	end
+	local pulse = hud.low_hp and (0.12 + math.sin(socket.gettime() * 6) * 0.06) or 0
+	gui.set_color(self.vignette, vmath.vector4(0.6, 0, 0, pulse))
+
+	if self.mobile_roots and input.is_mobile then
+		local b = self.touch_buttons
+		gui.set_enabled(b.pickup, hud.prompt_pickup)
+		gui.set_enabled(b.throw, hud.throw_enabled)
+		gui.set_enabled(b.attack, hud.melee_enabled)
+	end
+
+	spawn_floaters(self)
+	update_floaters(self, dt)
+
+	-- windows follow arena state
+	if hud.window ~= self.window_kind then
+		open_window(self, hud.window)
+	elseif hud.window == "results" and hud.result and hud.result.changed then
+		hud.result.changed = false
+		if self.result_lines and self.result_lines[2] then
+			gui.set_text(self.result_lines[2], hud.result.lines[2])
+		end
+	end
+
+	-- browser released pointer lock (Esc): treat as pause
+	if window.get_mouse_lock then
+		local locked = window.get_mouse_lock()
+		if self.was_locked and not locked and not self.window_kind then
+			gs.push_request("pause")
+		end
+		self.was_locked = locked
+	end
+end
+
+function on_message(self, message_id, message, sender)
+	self.druid:on_message(message_id, message, sender)
+end
+
+function on_input(self, action_id, action)
+	if self.druid:on_input(action_id, action) then
+		return true
+	end
+	if action_id == H_ESC then
+		if action.pressed then
+			if self.window_kind == "pause" then
+				gs.push_request("resume")
+			elseif not self.window_kind then
+				input.press("pause")
+			end
+		end
+		return true
+	end
+	if self.window_kind then
+		return true
+	end
+
+	if action_id == H_TOUCH_MULTI then
+		if not input.is_mobile then
+			set_mobile(self, true)
+		end
+		on_multitouch(self, action)
+		return true
+	end
+
+	if action_id == nil then
+		if not input.is_mobile and window.get_mouse_lock and window.get_mouse_lock() then
+			input.add_look(action.screen_dx or 0, action.screen_dy or 0)
+		end
+		return false
+	end
+
+	local key = KEY_MAP[action_id]
+	if key then
+		if action.pressed then input.keys[key] = true end
+		if action.released then input.keys[key] = false end
+		return true
+	end
+
+	if action_id == H_TOUCH then
+		if input.is_mobile then return true end
+		if action.pressed then
+			if window.set_mouse_lock and not window.get_mouse_lock() then
+				window.set_mouse_lock(true)
+			end
+			input.press("attack")
+		end
+		return true
+	elseif action_id == H_BLOCK then
+		if action.pressed then
+			input.press("block")
+			input.block_held = true
+		elseif action.released then
+			input.block_held = false
+		end
+		return true
+	elseif action_id == H_THROW then
+		if action.pressed then input.throw_held = true end
+		if action.released then input.throw_held = false end
+		return true
+	elseif action_id == H_DASH then
+		if action.pressed then input.press("dash") end
+		return true
+	elseif action_id == H_PICKUP then
+		if action.pressed then input.press("pickup") end
+		return true
+	end
+	return false
+end

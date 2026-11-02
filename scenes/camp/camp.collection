@@ -1,0 +1,14 @@
+name: "camp"
+instances {
+  id: "camp"
+  prototype: "/scenes/camp/camp.go"
+}
+instances {
+  id: "camera"
+  prototype: "/entities/camera/camera.go"
+}
+instances {
+  id: "hud"
+  prototype: "/scenes/camp/hud.go"
+}
+scale_along_z: 1
